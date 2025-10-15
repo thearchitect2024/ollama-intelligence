@@ -340,11 +340,15 @@ elif page == "🧠 Intelligence Extraction":
                 processed = 0
                 failed = 0
                 batch_size = settings.max_concurrent_llm  # 5 concurrent
+                
+                logger.info(f"Starting intelligence extraction for {len(contributors_to_process)} contributors")
 
                 # Process in batches
                 for batch_start in range(0, len(contributors_to_process), batch_size):
                     batch_end = min(batch_start + batch_size, len(contributors_to_process))
                     batch = contributors_to_process[batch_start:batch_end]
+                    
+                    logger.info(f"Processing batch {batch_start//batch_size + 1}: contributors {batch_start}-{batch_end}")
 
                     # Convert to profiles
                     profiles = []
@@ -375,16 +379,21 @@ elif page == "🧠 Intelligence Extraction":
                             summary = generate_summary_no_projects(profile)
                             profile.extracted_skills = []
                             profiles_without_descriptions.append((profile, summary))
+                            logger.debug(f"{profile.contributor_email}: No projects - skipping LLM")
 
                         elif not has_project_descriptions(profile):
                             # Case 2: Projects but no descriptions - skip LLM
                             summary = generate_summary_no_descriptions(profile)
                             profile.extracted_skills = []
                             profiles_without_descriptions.append((profile, summary))
+                            logger.debug(f"{profile.contributor_email}: No descriptions - skipping LLM")
 
                         else:
                             # Case 3: Has descriptions - will call LLM
                             profiles_with_descriptions.append(profile)
+                            logger.debug(f"{profile.contributor_email}: Has descriptions - will call LLM")
+                    
+                    logger.info(f"Batch breakdown: {len(profiles_with_descriptions)} need LLM, {len(profiles_without_descriptions)} skip LLM")
 
                     # Build prompts ONLY for profiles WITH descriptions
                     prompts = []
@@ -452,13 +461,16 @@ CRITICAL: You MUST include both "SUMMARY:" and "SKILLS:" headers."""
                             prompt_texts.append(prompt_text)
 
                         # Call LLM in TRUE BATCH MODE (concurrent processing)
+                        logger.info(f"Calling LLM for {len(prompt_texts)} profiles (batch size: {batch_size})...")
                         try:
                             llm_responses = await llm_client.generate_batch(prompt_texts, max_concurrent=batch_size)
+                            logger.info(f"LLM batch complete - received {len(llm_responses)} responses")
                         except Exception as e:
                             logger.error(f"Batch LLM generation failed: {e}")
                             llm_responses = [f"Error: {e}"] * len(prompt_texts)
 
                         # Parse LLM responses and extract skills
+                        logger.info(f"Parsing {len(llm_responses)} LLM responses...")
                         for profile, llm_response in zip(profiles_with_descriptions, llm_responses):
                             try:
                                 if not llm_response.startswith("Error:"):
@@ -469,11 +481,14 @@ CRITICAL: You MUST include both "SUMMARY:" and "SKILLS:" headers."""
                                     # Store in profile.intelligence_summary (will go to JSONB)
                                     if skills_list:
                                         profile.intelligence_summary = f"{summary_text}\n\nSkills: {', '.join(skills_list)}"
+                                        logger.debug(f"{profile.contributor_email}: Extracted {len(skills_list)} skills")
                                     else:
                                         profile.intelligence_summary = summary_text
+                                        logger.debug(f"{profile.contributor_email}: No skills extracted")
                                 else:
                                     profile.intelligence_summary = llm_response
                                     profile.extracted_skills = []
+                                    logger.warning(f"{profile.contributor_email}: LLM error: {llm_response}")
 
                                 # ONLY update JSONB (which includes intelligence_summary + extracted_skills)
                                 repo.upsert_contributor(profile)
