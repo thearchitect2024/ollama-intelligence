@@ -176,7 +176,11 @@ class DatabaseManager:
             Query results or None
         """
         with self.get_cursor() as cursor:
-            cursor.execute(query, params)
+            # SQLite doesn't accept None for params, PostgreSQL does
+            if params:
+                cursor.execute(query, params)
+            else:
+                cursor.execute(query)
 
             if fetch_one:
                 return cursor.fetchone()

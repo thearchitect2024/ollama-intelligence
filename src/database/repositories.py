@@ -25,6 +25,70 @@ class ContributorRepository:
         """
         self.db = db_manager
 
+    def _json_extract(self, field: str, path: str) -> str:
+        """
+        Generate JSON extraction SQL for both PostgreSQL and SQLite.
+        
+        Args:
+            field: Column name (e.g., 'processed_data')
+            path: JSON path (e.g., 'activity_summary.is_active_90d')
+        
+        Returns:
+            str: Database-specific JSON extraction syntax
+        """
+        if self.db.is_postgres:
+            # PostgreSQL: processed_data->'activity_summary'->>'is_active_90d'
+            parts = path.split('.')
+            result = field
+            for i, part in enumerate(parts):
+                if i == len(parts) - 1:
+                    result += f"->>{part!r}"  # Last part uses ->> to get text
+                else:
+                    result += f"->{part!r}"   # Intermediate parts use ->
+            return result
+        elif self.db.is_sqlite:
+            # SQLite: json_extract(processed_data, '$.activity_summary.is_active_90d')
+            json_path = '$.' + path.replace('.', '.')
+            return f"json_extract({field}, '{json_path}')"
+        else:
+            raise ValueError("Unsupported database type")
+
+    def _json_cast_float(self, json_expr: str) -> str:
+        """
+        Generate SQL to cast JSON value to float.
+        
+        Args:
+            json_expr: JSON extraction expression
+        
+        Returns:
+            str: Database-specific cast syntax
+        """
+        if self.db.is_postgres:
+            return f"({json_expr})::float"
+        elif self.db.is_sqlite:
+            return f"CAST({json_expr} AS REAL)"
+        else:
+            raise ValueError("Unsupported database type")
+
+    @property
+    def _param_placeholder(self) -> str:
+        """Get parameter placeholder for SQL queries."""
+        if self.db.is_postgres:
+            return "%s"
+        elif self.db.is_sqlite:
+            return "?"
+        else:
+            raise ValueError("Unsupported database type")
+
+    def _case_insensitive_like(self) -> str:
+        """Get case-insensitive LIKE operator."""
+        if self.db.is_postgres:
+            return "ILIKE"
+        elif self.db.is_sqlite:
+            return "LIKE"  # SQLite's LIKE is case-insensitive by default
+        else:
+            raise ValueError("Unsupported database type")
+
     def upsert_contributor(self, profile: ContributorProfile) -> bool:
         """
         Insert or update contributor profile by email.
@@ -37,21 +101,32 @@ class ContributorRepository:
         """
         try:
             processed_data = profile.model_dump_json_safe()
-
-            query = """
-                INSERT INTO contributors (
-                    email, contributor_id, processed_data,
-                    intelligence_summary, processing_status,
-                    created_at, updated_at
-                )
-                VALUES (%s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (email)
-                DO UPDATE SET
-                    processed_data = EXCLUDED.processed_data,
-                    intelligence_summary = EXCLUDED.intelligence_summary,
-                    processing_status = EXCLUDED.processing_status,
-                    updated_at = EXCLUDED.updated_at
-            """
+            ph = self._param_placeholder  # %s or ?
+            
+            if self.db.is_postgres:
+                query = f"""
+                    INSERT INTO contributors (
+                        email, contributor_id, processed_data,
+                        intelligence_summary, processing_status,
+                        created_at, updated_at
+                    )
+                    VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+                    ON CONFLICT (email)
+                    DO UPDATE SET
+                        processed_data = EXCLUDED.processed_data,
+                        intelligence_summary = EXCLUDED.intelligence_summary,
+                        processing_status = EXCLUDED.processing_status,
+                        updated_at = EXCLUDED.updated_at
+                """
+            else:  # SQLite
+                query = f"""
+                    INSERT OR REPLACE INTO contributors (
+                        email, contributor_id, processed_data,
+                        intelligence_summary, processing_status,
+                        created_at, updated_at
+                    )
+                    VALUES ({ph}, {ph}, {ph}, {ph}, {ph}, {ph}, {ph})
+                """
 
             params = (
                 profile.contributor_email,
@@ -59,8 +134,8 @@ class ContributorRepository:
                 json.dumps(processed_data),
                 profile.intelligence_summary,
                 profile.processing_status if isinstance(profile.processing_status, str) else profile.processing_status.value,
-                datetime.now(),
-                datetime.now()
+                datetime.now().isoformat(),
+                datetime.now().isoformat()
             )
 
             self.db.execute_query(query, params)
@@ -81,12 +156,14 @@ class ContributorRepository:
         Returns:
             dict: Contributor record or None
         """
-        query = """
+        ph = self._param_placeholder
+        
+        query = f"""
             SELECT email, contributor_id, processed_data,
                    intelligence_summary, processing_status,
                    created_at, updated_at, intelligence_extracted_at
             FROM contributors
-            WHERE email = %s
+            WHERE email = {ph}
         """
 
         result = self.db.execute_query(query, (email,), fetch_one=True)
@@ -127,11 +204,15 @@ class ContributorRepository:
         Returns:
             List[dict]: List of active contributors
         """
-        query = """
+        is_active_expr = self._json_extract('processed_data', 'activity_summary.is_active_90d')
+        hours_expr = self._json_extract('processed_data', 'activity_summary.weekly_hours_avg')
+        hours_cast = self._json_cast_float(hours_expr)
+        
+        query = f"""
             SELECT email, contributor_id, processed_data, intelligence_summary
             FROM contributors
-            WHERE processed_data->'activity_summary'->>'is_active_90d' = 'true'
-            ORDER BY (processed_data->'activity_summary'->>'weekly_hours_avg')::float DESC
+            WHERE {is_active_expr} = 'true'
+            ORDER BY {hours_cast} DESC
         """
         results = self.db.execute_query(query, fetch_all=True)
         return [dict(row) for row in results] if results else []
@@ -143,10 +224,12 @@ class ContributorRepository:
         Returns:
             List[dict]: List of inactive contributors
         """
-        query = """
+        is_active_expr = self._json_extract('processed_data', 'activity_summary.is_active_90d')
+        
+        query = f"""
             SELECT email, contributor_id, processed_data
             FROM contributors
-            WHERE processed_data->'activity_summary'->>'is_active_90d' = 'false'
+            WHERE {is_active_expr} = 'false'
         """
         results = self.db.execute_query(query, fetch_all=True)
         return [dict(row) for row in results] if results else []
@@ -163,15 +246,17 @@ class ContributorRepository:
             bool: True if successful
         """
         try:
-            query = """
+            ph = self._param_placeholder
+            
+            query = f"""
                 UPDATE contributors
-                SET intelligence_summary = %s,
-                    intelligence_extracted_at = %s,
-                    updated_at = %s
-                WHERE email = %s
+                SET intelligence_summary = {ph},
+                    intelligence_extracted_at = {ph},
+                    updated_at = {ph}
+                WHERE email = {ph}
             """
 
-            params = (summary, datetime.now(), datetime.now(), email)
+            params = (summary, datetime.now().isoformat(), datetime.now().isoformat(), email)
             self.db.execute_query(query, params)
             logger.info(f"Updated intelligence for: {email}")
             return True
@@ -192,15 +277,17 @@ class ContributorRepository:
             bool: True if successful
         """
         try:
-            query = """
+            ph = self._param_placeholder
+            
+            query = f"""
                 UPDATE contributors
-                SET processing_status = %s,
-                    error_message = %s,
-                    updated_at = %s
-                WHERE email = %s
+                SET processing_status = {ph},
+                    error_message = {ph},
+                    updated_at = {ph}
+                WHERE email = {ph}
             """
 
-            params = (ProcessingStatus.FAILED.value, error_message, datetime.now(), email)
+            params = (ProcessingStatus.FAILED.value, error_message, datetime.now().isoformat(), email)
             self.db.execute_query(query, params)
             return True
 
@@ -215,12 +302,14 @@ class ContributorRepository:
         Returns:
             dict: Statistics summary
         """
-        query = """
+        is_active_expr = self._json_extract('processed_data', 'activity_summary.is_active_90d')
+        
+        query = f"""
             SELECT
                 COUNT(*) as total,
                 SUM(CASE WHEN processing_status = 'completed' THEN 1 ELSE 0 END) as completed,
                 SUM(CASE WHEN processing_status = 'failed' THEN 1 ELSE 0 END) as failed,
-                SUM(CASE WHEN processed_data->'activity_summary'->>'is_active_90d' = 'true' THEN 1 ELSE 0 END) as active_90d,
+                SUM(CASE WHEN {is_active_expr} = 'true' THEN 1 ELSE 0 END) as active_90d,
                 SUM(CASE WHEN intelligence_summary IS NOT NULL THEN 1 ELSE 0 END) as with_intelligence
             FROM contributors
         """
@@ -238,10 +327,13 @@ class ContributorRepository:
         Returns:
             List[dict]: Matching contributors
         """
-        query = """
+        like_op = self._case_insensitive_like()
+        placeholder = self._param_placeholder
+        
+        query = f"""
             SELECT email, contributor_id, processed_data, intelligence_summary
             FROM contributors
-            WHERE email ILIKE %s
+            WHERE email {like_op} {placeholder}
             ORDER BY email
             LIMIT 50
         """
