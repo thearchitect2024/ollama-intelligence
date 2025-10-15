@@ -13,15 +13,31 @@ class Settings(BaseSettings):
     # ==========================================================================
     # DATABASE CONFIGURATION
     # ==========================================================================
+    # Support both direct DATABASE_URL (for SQLite/SageMaker) and PostgreSQL config
+    database_url: Optional[str] = None  # Direct database URL (SQLite or PostgreSQL)
+    
+    # PostgreSQL-specific settings (used only if database_url is not set)
     postgres_host: str = "localhost"
     postgres_port: int = 5432
     postgres_db: str = "contributor_intelligence"
     postgres_user: str = "postgres"
-    postgres_password: str
+    postgres_password: Optional[str] = None  # Optional for SQLite mode
 
-    @property
-    def database_url(self) -> str:
-        """Construct PostgreSQL connection URL."""
+    def get_database_url(self) -> str:
+        """
+        Get database connection URL.
+        Uses database_url if set (for SQLite), otherwise constructs PostgreSQL URL.
+        """
+        # If DATABASE_URL is explicitly set in environment, use it (SQLite or custom)
+        if self.database_url:
+            return self.database_url
+        
+        # Otherwise, construct PostgreSQL URL from individual settings
+        if not self.postgres_password:
+            raise ValueError(
+                "Either DATABASE_URL must be set, or postgres_password must be provided"
+            )
+        
         return (
             f"postgresql://{self.postgres_user}:{self.postgres_password}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
