@@ -29,14 +29,15 @@ class Settings(BaseSettings):
     db_batch_size: int = 10  # Number of intelligence updates to batch before DB commit
 
     # ==========================================================================
-    # LLM CONFIGURATION (Ollama - Running Locally)
+    # LLM CONFIGURATION (Embedded GPU - Qwen2.5 7B)
     # ==========================================================================
-    ollama_model: str = "qwen2.5:7b-instruct-q4_0"  # Using locally available model
-    ollama_base_url: str = "http://localhost:11434"  # Ollama running on localhost
-    max_tokens: int = 320  # Increased from 256 to ensure room for skills section
-    temperature: float = 0.05  # Lowered from 0.1 for better format compliance
-    top_p: float = 0.9
-    max_concurrent_llm: int = 10  # Process 10 profiles concurrently for async batch processing
+    # Model runs in-process on GPU with 4-bit quantization, micro-batching, and Flash Attention
+    ollama_model: str = "Qwen/Qwen2.5-7B-Instruct"  # Embedded model (no longer Ollama REST)
+    ollama_base_url: str = "embedded"  # Kept for backward compatibility but unused
+    max_tokens: int = 320  # Max new tokens to generate
+    temperature: float = 0.05  # Low temperature for consistent format compliance
+    top_p: float = 0.9  # Nucleus sampling parameter
+    max_concurrent_llm: int = 10  # Async concurrency limit (batch processing)
 
     # Summary validation
     summary_min_words: int = 140

@@ -18,10 +18,14 @@ pandas>=2.1.4
 numpy>=1.26.2
 
 # ============================================================================
-# LLM & AI
+# LLM & AI - Embedded GPU
 # ============================================================================
-langchain-ollama>=0.1.0
-langchain-core>=0.1.0
+torch>=2.0.0
+transformers>=4.43.0
+accelerate>=0.20.0
+bitsandbytes>=0.41.0  # For 4-bit quantization
+einops>=0.7.0  # Often required by transformers
+flash-attn>=2.0.0; platform_system != "Windows"  # Optional: FlashAttention2 for extra speed
 
 # ============================================================================
 # WEB FRAMEWORK (Streamlit)
