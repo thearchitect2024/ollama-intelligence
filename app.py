@@ -7,6 +7,10 @@ import pandas as pd
 import logging
 import time
 from datetime import datetime
+import os
+
+# Create logs directory if it doesn't exist
+os.makedirs('logs', exist_ok=True)
 
 # Configure logging
 logging.basicConfig(
