@@ -82,7 +82,15 @@ def _init_model(settings: Settings):
 
         quant_args = {}
         dtype = None
-        attn_impl = "flash_attention_2"  # will fallback internally if not installed
+        
+        # Try FlashAttention2, fallback to SDPA if not available
+        attn_impl = "sdpa"  # default to SDPA
+        try:
+            import flash_attn
+            attn_impl = "flash_attention_2"
+            logger.info("⚡ FlashAttention2 available, will use it")
+        except ImportError:
+            logger.info("ℹ️  FlashAttention2 not installed, using SDPA (still fast!)")
 
         if USE_4BIT:
             # Try bitsandbytes 4-bit (closest embedded analogue to Ollama q4_0)
