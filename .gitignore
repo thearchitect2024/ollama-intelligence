@@ -1,0 +1,45 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+logs/
+/tmp/
+
+# Environment
+.env
+*.env.local
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Backup files
+*.backup
+*_backup/
+legacy_backup/
+
+# Test files
+test_output.txt
+coverage.xml
+
+# Temporary files
+*.tmp
+.pytest_cache/
