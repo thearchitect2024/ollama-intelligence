@@ -84,7 +84,13 @@ class ContributorRepository:
         """
 
         result = self.db.execute_query(query, (email,), fetch_one=True)
-        return dict(result) if result else None
+        if result:
+            data = dict(result)
+            # Parse JSON string back to dictionary
+            if isinstance(data.get('processed_data'), str):
+                data['processed_data'] = json.loads(data['processed_data'])
+            return data
+        return None
 
     def get_all_emails(self) -> List[str]:
         """
@@ -110,7 +116,16 @@ class ContributorRepository:
             ORDER BY updated_at DESC
         """
         results = self.db.execute_query(query, fetch_all=True)
-        return [dict(row) for row in results] if results else []
+        if results:
+            parsed_results = []
+            for row in results:
+                data = dict(row)
+                # Parse JSON string back to dictionary
+                if isinstance(data.get('processed_data'), str):
+                    data['processed_data'] = json.loads(data['processed_data'])
+                parsed_results.append(data)
+            return parsed_results
+        return []
 
     def get_active_90d(self) -> List[dict]:
         """
@@ -126,7 +141,16 @@ class ContributorRepository:
             ORDER BY CAST(json_extract(processed_data, '$.activity_summary.weekly_hours_avg') AS REAL) DESC
         """
         results = self.db.execute_query(query, fetch_all=True)
-        return [dict(row) for row in results] if results else []
+        if results:
+            parsed_results = []
+            for row in results:
+                data = dict(row)
+                # Parse JSON string back to dictionary
+                if isinstance(data.get('processed_data'), str):
+                    data['processed_data'] = json.loads(data['processed_data'])
+                parsed_results.append(data)
+            return parsed_results
+        return []
 
     def get_inactive_90d(self) -> List[dict]:
         """
@@ -141,7 +165,16 @@ class ContributorRepository:
             WHERE json_extract(processed_data, '$.activity_summary.is_active_90d') = 'false'
         """
         results = self.db.execute_query(query, fetch_all=True)
-        return [dict(row) for row in results] if results else []
+        if results:
+            parsed_results = []
+            for row in results:
+                data = dict(row)
+                # Parse JSON string back to dictionary
+                if isinstance(data.get('processed_data'), str):
+                    data['processed_data'] = json.loads(data['processed_data'])
+                parsed_results.append(data)
+            return parsed_results
+        return []
 
     def update_intelligence(self, email: str, summary: str) -> bool:
         """
@@ -239,7 +272,16 @@ class ContributorRepository:
         """
 
         results = self.db.execute_query(query, (f"%{search_term}%",), fetch_all=True)
-        return [dict(row) for row in results] if results else []
+        if results:
+            parsed_results = []
+            for row in results:
+                data = dict(row)
+                # Parse JSON string back to dictionary
+                if isinstance(data.get('processed_data'), str):
+                    data['processed_data'] = json.loads(data['processed_data'])
+                parsed_results.append(data)
+            return parsed_results
+        return []
 
     def get_contributors_without_intelligence(self) -> List[dict]:
         """
@@ -257,4 +299,13 @@ class ContributorRepository:
         """
 
         results = self.db.execute_query(query, fetch_all=True)
-        return [dict(row) for row in results] if results else []
+        if results:
+            parsed_results = []
+            for row in results:
+                data = dict(row)
+                # Parse JSON string back to dictionary
+                if isinstance(data.get('processed_data'), str):
+                    data['processed_data'] = json.loads(data['processed_data'])
+                parsed_results.append(data)
+            return parsed_results
+        return []
