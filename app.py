@@ -369,62 +369,42 @@ elif page == "🧠 Intelligence Extraction":
             progress_bar = st.progress(0)
             status_text = st.empty()
 
-            # Define async batch processor
-            async def process_all_batches():
-                processed = 0
-                failed = 0
+            # STREAMING ARCHITECTURE: Per-contributor processing
+            def process_one_contributor(contrib_data: dict) -> tuple[bool, str]:
+                """
+                Process a single contributor with streaming LLM calls.
                 
-                logger.info(f"Starting intelligence extraction for {len(contributors_to_process)} contributors")
-
-                # Convert ALL to profiles at once
-                all_profiles = []
-                for contrib in contributors_to_process:
-                    try:
-                        profile = ContributorProfile(**contrib['processed_data'])
-                        all_profiles.append(profile)
-                    except Exception as e:
-                        logger.error(f"Failed to parse profile: {e}")
-                        failed += 1
-
-                # Import utility functions for smart skip logic
-                from src.intelligence.skill_extractor import (
-                    has_project_descriptions,
-                    generate_summary_no_projects,
-                    generate_summary_no_descriptions,
-                    parse_llm_response
-                )
-
-                # SMART SKIP LOGIC: Separate profiles by description availability
-                profiles_with_descriptions = []
-                profiles_without_descriptions = []
-
-                for profile in all_profiles:
-                    # Check if profile has project descriptions
+                Returns:
+                    (success, error_message)
+                """
+                try:
+                    # Parse profile
+                    profile = ContributorProfile(**contrib_data['processed_data'])
+                    
+                    # Import utility functions
+                    from src.intelligence.skill_extractor import (
+                        has_project_descriptions,
+                        generate_summary_no_projects,
+                        generate_summary_no_descriptions,
+                        parse_llm_response
+                    )
+                    
+                    # SMART SKIP LOGIC
                     if not profile.production_projects:
-                        # Case 1: No projects - skip LLM
+                        # No projects - skip LLM
                         summary = generate_summary_no_projects(profile)
                         profile.extracted_skills = []
-                        profiles_without_descriptions.append((profile, summary))
-                        logger.debug(f"{profile.contributor_email}: No projects - skipping LLM")
-
+                        profile.intelligence_summary = summary
+                        
                     elif not has_project_descriptions(profile):
-                        # Case 2: Projects but no descriptions - skip LLM
+                        # Projects but no descriptions - skip LLM
                         summary = generate_summary_no_descriptions(profile)
                         profile.extracted_skills = []
-                        profiles_without_descriptions.append((profile, summary))
-                        logger.debug(f"{profile.contributor_email}: No descriptions - skipping LLM")
-
+                        profile.intelligence_summary = summary
+                        
                     else:
-                        # Case 3: Has descriptions - will call LLM
-                        profiles_with_descriptions.append(profile)
-                        logger.debug(f"{profile.contributor_email}: Has descriptions - will call LLM")
-                
-                logger.info(f"Total breakdown: {len(profiles_with_descriptions)} need LLM, {len(profiles_without_descriptions)} skip LLM")
-
-                # Build ALL prompts for profiles WITH descriptions
-                prompt_texts = []
-                for profile in profiles_with_descriptions:
-                    prompt_text = f"""You MUST output in this EXACT format:
+                        # Has descriptions - call LLM (via dispatcher queue)
+                        prompt_text = f"""You MUST output in this EXACT format:
 
 SUMMARY:
 [Your 90-120 word paragraph here]
@@ -474,83 +454,79 @@ What NOT to extract:
 - General abilities (e.g., "Fast learner", "Detail-oriented", "Adaptable")
 
 CRITICAL: You MUST include both "SUMMARY:" and "SKILLS:" headers."""
-                    prompt_texts.append(prompt_text)
-
-                # Call LLM for ALL prompts at once (embedded_llm handles micro-batching + concurrency)
-                if prompt_texts:
-                    logger.info(f"🚀 Sending ALL {len(prompt_texts)} prompts to embedded_llm (will micro-batch internally)...")
-                    
-                    # Progress callback for live updates
-                    def update_batch_progress(completed_buckets, total_buckets):
-                        # Estimate profiles completed (buckets × avg batch size)
-                        est_profiles = min(completed_buckets * settings.micro_batch_size, len(prompt_texts))
-                        progress = est_profiles / len(contributors_to_process)
-                        elapsed = time.time() - start_time
-                        rate = est_profiles / elapsed if elapsed > 0 else 0
-                        eta_seconds = (len(contributors_to_process) - est_profiles) / rate if rate > 0 else 0
                         
-                        progress_bar.progress(min(progress, 0.99))
-                        status_text.text(
-                            f"🔥 GPU Processing: {completed_buckets}/{total_buckets} batches | "
-                            f"~{est_profiles}/{len(prompt_texts)} prompts | "
-                            f"Speed: {rate:.1f} profiles/sec | "
-                            f"ETA: {eta_seconds/60:.1f} min"
-                        )
+                        # Call LLM via streaming dispatcher (blocks until result ready)
+                        llm_response = llm_client.generate(prompt_text)
+                        
+                        # Parse response
+                        summary_text, skills_list = parse_llm_response(llm_response)
+                        profile.extracted_skills = skills_list
+                        
+                        if skills_list:
+                            profile.intelligence_summary = f"{summary_text}\n\nSkills: {', '.join(skills_list)}"
+                        else:
+                            profile.intelligence_summary = summary_text
                     
-                    try:
-                        llm_responses = await llm_client.generate_batch(
-                            prompt_texts, 
-                            max_concurrent=settings.max_concurrent_llm,
-                            progress_callback=update_batch_progress
-                        )
-                        logger.info(f"✅ LLM processing complete - received {len(llm_responses)} responses")
-                    except Exception as e:
-                        logger.error(f"❌ Batch LLM generation failed: {e}")
-                        llm_responses = [f"Error: {e}"] * len(prompt_texts)
+                    # Update database
+                    repo.upsert_contributor(profile)
+                    return True, ""
+                    
+                except Exception as e:
+                    error_msg = str(e)
+                    logger.error(f"Failed to process {contrib_data.get('contributor_email', 'unknown')}: {e}")
+                    return False, error_msg
 
-                    # Parse LLM responses and extract skills
-                    logger.info(f"Parsing {len(llm_responses)} LLM responses...")
-                    for profile, llm_response in zip(profiles_with_descriptions, llm_responses):
+            # Run with ThreadPoolExecutor for streaming architecture
+            async def process_all_batches():
+                """
+                STREAMING ARCHITECTURE with ThreadPoolExecutor.
+                
+                Each worker thread processes one contributor at a time.
+                Threads submit requests to dispatcher queue, which collects
+                them over 50ms latency window and forms GPU batches.
+                """
+                processed = 0
+                failed = 0
+                
+                logger.info(f"🚀 Starting STREAMING extraction: {len(contributors_to_process)} contributors, {settings.extraction_workers} workers")
+                
+                # ThreadPoolExecutor for app-level parallelism
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                
+                with ThreadPoolExecutor(max_workers=settings.extraction_workers) as executor:
+                    # Submit all contributors to thread pool
+                    futures = {executor.submit(process_one_contributor, contrib): contrib 
+                              for contrib in contributors_to_process}
+                    
+                    # Collect results as they complete
+                    for future in as_completed(futures):
+                        contrib = futures[future]
                         try:
-                            if not llm_response.startswith("Error:"):
-                                # Parse to extract summary and skills
-                                summary_text, skills_list = parse_llm_response(llm_response)
-                                profile.extracted_skills = skills_list
-
-                                # Store in profile.intelligence_summary (will go to JSONB)
-                                if skills_list:
-                                    profile.intelligence_summary = f"{summary_text}\n\nSkills: {', '.join(skills_list)}"
-                                    logger.debug(f"{profile.contributor_email}: Extracted {len(skills_list)} skills")
-                                else:
-                                    profile.intelligence_summary = summary_text
-                                    logger.debug(f"{profile.contributor_email}: No skills extracted")
+                            success, error_msg = future.result()
+                            if success:
+                                processed += 1
                             else:
-                                profile.intelligence_summary = llm_response
-                                profile.extracted_skills = []
-                                logger.warning(f"{profile.contributor_email}: LLM error: {llm_response}")
-
-                            # ONLY update JSONB (which includes intelligence_summary + extracted_skills)
-                            repo.upsert_contributor(profile)
-                            processed += 1
-
+                                failed += 1
+                            
+                            # Update progress
+                            total_done = processed + failed
+                            progress = total_done / len(contributors_to_process)
+                            elapsed = time.time() - start_time
+                            rate = total_done / elapsed if elapsed > 0 else 0
+                            eta_seconds = (len(contributors_to_process) - total_done) / rate if rate > 0 else 0
+                            
+                            progress_bar.progress(min(progress, 0.99))
+                            status_text.text(
+                                f"🔄 Streaming: {total_done}/{len(contributors_to_process)} | "
+                                f"Success: {processed} | Failed: {failed} | "
+                                f"Speed: {rate:.1f} profiles/sec | "
+                                f"ETA: {eta_seconds/60:.1f} min"
+                            )
+                            
                         except Exception as e:
-                            logger.error(f"Failed to process {profile.contributor_email}: {e}")
+                            logger.error(f"Worker thread error for {contrib.get('contributor_email', 'unknown')}: {e}")
                             failed += 1
-
-                # Update database for profiles WITHOUT descriptions (fast path)
-                for profile, summary in profiles_without_descriptions:
-                    try:
-                        # Store summary in profile object
-                        profile.intelligence_summary = summary
-                        # profile.extracted_skills already set to [] above
-
-                        # ONLY update JSONB
-                        repo.upsert_contributor(profile)
-                        processed += 1
-                    except Exception as e:
-                        logger.error(f"Failed to update DB for {profile.contributor_email}: {e}")
-                        failed += 1
-
+                
                 # Final progress update
                 elapsed = time.time() - start_time
                 rate = processed / elapsed if elapsed > 0 else 0

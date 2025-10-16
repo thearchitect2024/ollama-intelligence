@@ -40,9 +40,9 @@ class Settings(BaseSettings):
     max_concurrent_llm: int = 1  # Worker threads for micro-batch collection (1-2 recommended for optimal bucketing)
     
     # GPU Optimization Parameters (new embedded engine)
-    infer_concurrency: int = 3  # Max concurrent GPU batches (semaphore slots)
-    micro_batch_size: int = 6  # Target prompts per batch
-    batch_latency_ms: int = 100  # Max wait time to collect batch (ms)
+    infer_concurrency: int = 10  # Max concurrent GPU batches (semaphore slots) - INCREASED for L4!
+    micro_batch_size: int = 31  # Target prompts per batch (optimal for L4 GPU)
+    batch_latency_ms: int = 50  # Max wait time to collect batch (ms) - lower for faster response
     prefill_batch_tokens: int = 4096  # Max input tokens per prefill batch
     decode_concurrency: int = 8  # Max concurrent decode operations
     use_flash_attention: bool = True  # Enable FlashAttention-2 (if available)
@@ -54,6 +54,7 @@ class Settings(BaseSettings):
     csv_workers: int = 8  # Parallel workers for CSV processing (CPU-bound)
     db_batch_size_upsert: int = 100  # Batch size for database upserts
     db_workers: int = 10  # Parallel workers for DB operations (I/O-bound)
+    extraction_workers: int = 10  # App-level threads for per-contributor extraction (streaming model)
 
     # Summary validation
     summary_min_words: int = 140

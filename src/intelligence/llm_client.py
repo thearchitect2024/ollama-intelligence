@@ -52,7 +52,10 @@ class EmbeddedLLMClient:
     
     def generate(self, prompt: str, max_retries: int = 3) -> str:
         """
-        Generate text for a single prompt (synchronous).
+        Generate text for a single prompt (synchronous, streaming).
+        
+        Submits to dispatcher queue and blocks until result ready.
+        Perfect for per-request processing with ThreadPoolExecutor.
         
         Args:
             prompt: Input prompt
@@ -65,7 +68,7 @@ class EmbeddedLLMClient:
         
         for attempt in range(max_retries):
             try:
-                return self.engine.generate_single(prompt)
+                return self.engine.generate(prompt)  # Uses streaming dispatcher
             except Exception as e:
                 logger.warning(f"Generation attempt {attempt+1} failed: {e}")
                 if attempt == max_retries - 1:

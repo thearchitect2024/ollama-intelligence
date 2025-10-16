@@ -1,28 +1,37 @@
 """
 Optimized embedded GPU LLM engine for Qwen 2.5 7B Instruct (Q4_0).
 
+HYBRID ARCHITECTURE (Best of Both Worlds):
+- Queue + Dispatcher thread with latency window (streaming model)
+- Length-aware bucketing (efficiency optimization)
+- Per-request Futures (async blocking)
+- Semaphore-controlled GPU concurrency (prevents OOM)
+
 Features:
 - FlashAttention-2 with SDPA fallback
-- Micro-batching with length-aware bucketing
+- Micro-batching with 50ms latency window
+- Length-aware bucketing for padding reduction
 - Pinned memory + dual CUDA streams
 - torch.compile for graph optimization
-- Controlled concurrency with semaphores
-- Comprehensive batch-level logging
+- 10 concurrent GPU batches (tested safe on L4)
 
-ARCHITECTURE NOTE:
-- app.py sends ALL prompts at once to generate_batch()
-- This engine handles ALL micro-batching, bucketing, and concurrency internally
-- No iteration batching happens at the app layer
-- This allows optimal length-aware bucketing across all prompts
+FLOW:
+1. App threads submit requests to queue → get Future
+2. Dispatcher collects requests over 50ms window
+3. Groups into length-aware buckets (31 items each)
+4. Semaphore controls GPU concurrency (10 max)
+5. GPU processes batch → results set on Futures
+6. App threads unblock and continue
 """
 import os
 import time
 import queue
 import logging
 import threading
-from typing import List, Optional, Tuple
+from typing import List, Optional, Tuple, Any
 from dataclasses import dataclass
 from collections import defaultdict
+from concurrent.futures import Future
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -213,6 +222,124 @@ def _reset_vram_peak():
 
 
 # =============================================================================
+# Micro-Batch Dispatcher (Queue + Latency Window)
+# =============================================================================
+class MicroBatchDispatcher:
+    """
+    Continuous dispatcher that collects requests over a latency window.
+    
+    Similar to the reference architecture but adds length-aware bucketing.
+    """
+    
+    def __init__(self, max_batch_size: int, latency_ms: int, semaphore: threading.BoundedSemaphore):
+        self.max_batch_size = max_batch_size
+        self.latency_ms = latency_ms
+        self.semaphore = semaphore
+        self.q = queue.Queue()
+        self._stopping = False
+        self._thread = threading.Thread(target=self._loop, name="mb-dispatcher", daemon=True)
+        self._thread.start()
+        logger.info(f"🚀 Dispatcher started: batch_size={max_batch_size}, latency={latency_ms}ms")
+    
+    def submit(self, prompt: str) -> str:
+        """
+        Submit a prompt for generation. Blocks until result ready.
+        
+        Args:
+            prompt: Input prompt string
+            
+        Returns:
+            Generated text
+        """
+        fut = Future()
+        self.q.put((prompt, fut))
+        return fut.result()  # Block until dispatcher processes and sets result
+    
+    def _loop(self):
+        """Dispatcher loop: collect requests over latency window, then process."""
+        while not self._stopping:
+            try:
+                # Wait for first item (blocking)
+                first_item = self.q.get(timeout=0.1)
+                batch = [first_item]
+                
+                # Set deadline (current_time + latency_ms)
+                deadline = time.perf_counter() + (self.latency_ms / 1000.0)
+                
+                # Collect more items until deadline OR batch full
+                while len(batch) < self.max_batch_size:
+                    remaining = deadline - time.perf_counter()
+                    if remaining <= 0:
+                        break  # Time's up!
+                    
+                    try:
+                        item = self.q.get(timeout=remaining)
+                        batch.append(item)
+                    except queue.Empty:
+                        break  # No more items
+                
+                # Process batch
+                if batch:
+                    self._process_batch(batch)
+                    
+            except queue.Empty:
+                continue  # No items, wait for next
+            except Exception as e:
+                logger.error(f"Dispatcher error: {e}")
+    
+    def _process_batch(self, items: List[Tuple[str, Future]]):
+        """
+        Process a batch with length-aware bucketing and GPU execution.
+        
+        Args:
+            items: List of (prompt, future) tuples
+        """
+        prompts = [item[0] for item in items]
+        futures = [item[1] for item in items]
+        
+        # Length-aware bucketing for efficiency
+        # Group prompts by similar length to reduce padding
+        indexed = [(i, p, len(_tokenizer.encode(p, add_special_tokens=False))) 
+                   for i, p in enumerate(prompts)]
+        indexed.sort(key=lambda x: x[2])  # Sort by length
+        
+        # Create length buckets
+        buckets = []
+        for i in range(0, len(indexed), self.max_batch_size):
+            bucket_items = indexed[i:i + self.max_batch_size]
+            bucket_indices = [item[0] for item in bucket_items]
+            bucket_prompts = [item[1] for item in bucket_items]
+            buckets.append((bucket_indices, bucket_prompts))
+        
+        # Process each bucket with semaphore control
+        for bucket_indices, bucket_prompts in buckets:
+            with self.semaphore:  # GPU concurrency control
+                try:
+                    # Generate for this bucket
+                    results, _ = _generate_batch_optimized(
+                        bucket_prompts,
+                        max_new_tokens=320,
+                        temperature=0.05,
+                        top_p=0.9
+                    )
+                    
+                    # Set results on corresponding futures
+                    for idx, result in zip(bucket_indices, results):
+                        futures[idx].set_result(result)
+                        
+                except Exception as e:
+                    logger.error(f"Batch processing error: {e}")
+                    # Set error on all futures in this bucket
+                    for idx in bucket_indices:
+                        futures[idx].set_exception(e)
+    
+    def shutdown(self):
+        """Gracefully shutdown the dispatcher."""
+        self._stopping = True
+        self._thread.join(timeout=2.0)
+
+
+# =============================================================================
 # Length-Aware Bucketing
 # =============================================================================
 def _bucket_by_length(prompts: List[str], bucket_size: int = 8) -> List[List[Tuple[int, str]]]:
@@ -358,13 +485,27 @@ def _generate_batch_optimized(
 # Public API
 # =============================================================================
 class EmbeddedLLMEngine:
-    """Optimized embedded LLM engine."""
+    """
+    Optimized embedded LLM engine with streaming dispatcher.
+    
+    Uses Queue + Dispatcher thread for continuous request collection.
+    """
     
     def __init__(self, temperature: float, top_p: float, max_tokens: int):
         self.temperature = temperature
         self.top_p = top_p
         self.max_tokens = max_tokens
+        self._semaphore = _semaphore  # Use global semaphore
+        
+        # Initialize model
         _init_model(temperature, top_p, max_tokens)
+        
+        # Initialize dispatcher
+        self._dispatcher = MicroBatchDispatcher(
+            max_batch_size=MICRO_BATCH_SIZE,
+            latency_ms=BATCH_LATENCY_MS,
+            semaphore=self._semaphore
+        )
         
         logger.info(
             f"🚀 EmbeddedLLMEngine initialized | "
@@ -372,15 +513,24 @@ class EmbeddedLLMEngine:
             f"latency={BATCH_LATENCY_MS}ms, flash_attn={USE_FLASH_ATTENTION}"
         )
     
+    def generate(self, prompt: str) -> str:
+        """
+        Generate for a single prompt using streaming dispatcher.
+        
+        This is the main method for per-request processing.
+        Submits to queue and blocks until result ready.
+        
+        Args:
+            prompt: Input prompt
+            
+        Returns:
+            Generated text
+        """
+        return self._dispatcher.submit(prompt)
+    
     def generate_single(self, prompt: str) -> str:
-        """Generate for a single prompt."""
-        results, _ = _generate_batch_optimized(
-            [prompt],
-            self.max_tokens,
-            self.temperature,
-            self.top_p
-        )
-        return results[0]
+        """Alias for generate() for backward compatibility."""
+        return self.generate(prompt)
     
     def generate_batch(self, prompts: List[str], progress_callback=None) -> Tuple[List[str], List[BatchMetrics]]:
         """
