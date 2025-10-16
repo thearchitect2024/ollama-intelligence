@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     max_tokens: int = 320  # Max new tokens to generate
     temperature: float = 0.05  # Low temperature for consistent format compliance
     top_p: float = 0.9  # Nucleus sampling parameter
-    max_concurrent_llm: int = 1  # Worker threads for batch collection (REDUCED to enable batching!)
+    max_concurrent_llm: int = 1  # Worker threads for micro-batch collection (1-2 recommended for optimal bucketing)
     
     # GPU Optimization Parameters (new embedded engine)
     infer_concurrency: int = 3  # Max concurrent GPU batches (semaphore slots)

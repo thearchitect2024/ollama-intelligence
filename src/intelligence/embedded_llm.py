@@ -8,6 +8,12 @@ Features:
 - torch.compile for graph optimization
 - Controlled concurrency with semaphores
 - Comprehensive batch-level logging
+
+ARCHITECTURE NOTE:
+- app.py sends ALL prompts at once to generate_batch()
+- This engine handles ALL micro-batching, bucketing, and concurrency internally
+- No iteration batching happens at the app layer
+- This allows optimal length-aware bucketing across all prompts
 """
 import os
 import time
