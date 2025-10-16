@@ -382,10 +382,16 @@ class EmbeddedLLMEngine:
         )
         return results[0]
     
-    def generate_batch(self, prompts: List[str]) -> Tuple[List[str], List[BatchMetrics]]:
+    def generate_batch(self, prompts: List[str], progress_callback=None) -> Tuple[List[str], List[BatchMetrics]]:
         """
-        Generate for multiple prompts with length-aware bucketing.
-        Returns (results, metrics_per_bucket).
+        Generate for multiple prompts with length-aware bucketing and concurrent processing.
+        
+        Args:
+            prompts: List of prompts to process
+            progress_callback: Optional callback(completed, total) for progress updates
+            
+        Returns:
+            (results, metrics_per_bucket)
         """
         if not prompts:
             return [], []
@@ -394,32 +400,64 @@ class EmbeddedLLMEngine:
             results, metrics = _generate_batch_optimized(
                 prompts, self.max_tokens, self.temperature, self.top_p
             )
+            if progress_callback:
+                progress_callback(1, 1)
             return results, [metrics]
         
         # Bucket by length
         buckets = _bucket_by_length(prompts, bucket_size=MICRO_BATCH_SIZE)
         logger.info(f"📦 Split {len(prompts)} prompts into {len(buckets)} buckets")
         
-        # Process each bucket
+        # Process buckets concurrently
         all_results = [None] * len(prompts)
         all_metrics = []
+        completed_buckets = [0]  # Mutable for closure
         
-        for bucket in buckets:
+        def process_bucket(bucket):
+            """Process a single bucket with semaphore control."""
             indices, bucket_prompts = zip(*bucket)
             
-            # Generate
-            bucket_results, metrics = _generate_batch_optimized(
-                list(bucket_prompts),
-                self.max_tokens,
-                self.temperature,
-                self.top_p
-            )
+            # Semaphore controls GPU concurrency
+            with self._semaphore:
+                bucket_results, metrics = _generate_batch_optimized(
+                    list(bucket_prompts),
+                    self.max_tokens,
+                    self.temperature,
+                    self.top_p
+                )
             
-            # Map back to original indices
-            for idx, result in zip(indices, bucket_results):
-                all_results[idx] = result
+            return indices, bucket_results, metrics
+        
+        # Use ThreadPoolExecutor for concurrent bucket processing
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        with ThreadPoolExecutor(max_workers=self.infer_concurrency) as executor:
+            # Submit all buckets
+            futures = {executor.submit(process_bucket, bucket): i for i, bucket in enumerate(buckets)}
             
-            all_metrics.append(metrics)
+            # Collect results as they complete
+            for future in as_completed(futures):
+                bucket_idx = futures[future]
+                try:
+                    indices, bucket_results, metrics = future.result()
+                    
+                    # Map back to original indices
+                    for idx, result in zip(indices, bucket_results):
+                        all_results[idx] = result
+                    
+                    all_metrics.append(metrics)
+                    
+                    # Update progress
+                    completed_buckets[0] += 1
+                    if progress_callback:
+                        progress_callback(completed_buckets[0], len(buckets))
+                        
+                except Exception as e:
+                    logger.error(f"Bucket {bucket_idx} failed: {e}")
+                    # Fill with error messages for this bucket
+                    bucket = buckets[bucket_idx]
+                    for idx, _ in bucket:
+                        all_results[idx] = f"Error: {e}"
         
         return all_results, all_metrics
     

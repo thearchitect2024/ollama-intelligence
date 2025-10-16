@@ -47,6 +47,13 @@ class Settings(BaseSettings):
     decode_concurrency: int = 8  # Max concurrent decode operations
     use_flash_attention: bool = True  # Enable FlashAttention-2 (if available)
     enable_compile: bool = True  # Enable torch.compile optimization
+    
+    # ==========================================================================
+    # PARALLEL PROCESSING CONFIGURATION
+    # ==========================================================================
+    csv_workers: int = 8  # Parallel workers for CSV processing (CPU-bound)
+    db_batch_size_upsert: int = 100  # Batch size for database upserts
+    db_workers: int = 10  # Parallel workers for DB operations (I/O-bound)
 
     # Summary validation
     summary_min_words: int = 140

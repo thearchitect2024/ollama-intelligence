@@ -65,6 +65,69 @@ class ContributorRepository:
             logger.error(f"Failed to upsert contributor {profile.contributor_email}: {e}")
             return False
 
+    def batch_upsert(self, profiles: List[ContributorProfile]) -> tuple[int, int]:
+        """
+        Batch upsert multiple contributors in a single transaction.
+        
+        Args:
+            profiles: List of contributor profiles to upsert
+            
+        Returns:
+            tuple: (successful_count, failed_count)
+        """
+        if not profiles:
+            return 0, 0
+            
+        successful = 0
+        failed = 0
+        
+        query = """
+            INSERT OR REPLACE INTO contributors
+                (email, contributor_id, processed_data, intelligence_summary,
+                 processing_status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """
+        
+        try:
+            # Get connection for transaction
+            conn = self.db.get_connection()
+            cursor = conn.cursor()
+            
+            # Start transaction
+            cursor.execute("BEGIN TRANSACTION")
+            
+            for profile in profiles:
+                try:
+                    processed_data = profile.model_dump(mode='json', exclude={'intelligence_summary'})
+                    params = (
+                        profile.contributor_email,
+                        profile.contributor_id,
+                        json.dumps(processed_data),
+                        profile.intelligence_summary,
+                        profile.processing_status if isinstance(profile.processing_status, str) else profile.processing_status.value,
+                        datetime.now().isoformat(),
+                        datetime.now().isoformat()
+                    )
+                    cursor.execute(query, params)
+                    successful += 1
+                except Exception as e:
+                    logger.error(f"Failed to upsert {profile.contributor_email} in batch: {e}")
+                    failed += 1
+            
+            # Commit transaction
+            conn.commit()
+            logger.info(f"Batch upsert complete: {successful} successful, {failed} failed")
+            
+        except Exception as e:
+            logger.error(f"Batch upsert transaction failed: {e}")
+            try:
+                conn.rollback()
+            except:
+                pass
+            return 0, len(profiles)
+        
+        return successful, failed
+
     def get_by_email(self, email: str) -> Optional[dict]:
         """
         Fetch contributor by email.

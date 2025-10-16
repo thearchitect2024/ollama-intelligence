@@ -5,7 +5,7 @@ Generates 140-170 word contributor summaries using LLM from ALL production proje
 import logging
 from typing import Tuple, List
 from src.models import ContributorProfile
-from src.intelligence.llm_client import OllamaClient
+from src.intelligence.llm_client import EmbeddedLLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ def generate_summary_no_descriptions(profile: ContributorProfile) -> str:
     return summary
 
 
-def generate_intelligence_summary(profile: ContributorProfile, llm_client: OllamaClient) -> str:
+def generate_intelligence_summary(profile: ContributorProfile, llm_client: EmbeddedLLMClient) -> str:
     """
     Generate 140-170 word intelligence summary for contributor using ALL production projects.
 

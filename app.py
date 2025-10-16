@@ -29,7 +29,7 @@ from src.database.connection import DatabaseManager
 from src.database.repositories import ContributorRepository
 from src.database.migrations import create_schema
 from src.processors.data_processor import process_csv_batch
-from src.intelligence.llm_client import OllamaClient
+from src.intelligence.llm_client import EmbeddedLLMClient
 
 # Page configuration
 st.set_page_config(
@@ -134,31 +134,65 @@ if page == "📤 Upload & Process":
             else:  # local
                 chunk_iterator = pd.read_csv(file_source, chunksize=chunksize)
 
-            # Process chunks
-            for chunk_num, chunk_df in enumerate(chunk_iterator):
+            # Process chunks with parallel workers
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            from src.processors.data_processor import process_contributor
+            
+            def process_chunk_parallel(chunk_df):
+                """Process a chunk of rows in parallel."""
+                chunk_profiles = []
+                chunk_failed = 0
+                
                 for idx, row in chunk_df.iterrows():
                     try:
-                        from src.processors.data_processor import process_contributor
                         profile = process_contributor(row, settings)
-                        repo.upsert_contributor(profile)
-                        processed_count += 1
+                        chunk_profiles.append(profile)
                     except Exception as e:
-                        failed_count += 1
+                        chunk_failed += 1
                         logger.error(f"Failed to process row {idx}: {e}")
+                
+                return chunk_profiles, chunk_failed
+            
+            # Process chunks with workers
+            with ThreadPoolExecutor(max_workers=settings.csv_workers) as executor:
+                futures = {}
+                
+                # Submit chunks to workers
+                for chunk_num, chunk_df in enumerate(chunk_iterator):
+                    future = executor.submit(process_chunk_parallel, chunk_df)
+                    futures[future] = chunk_num
+                
+                # Collect results as they complete
+                for future in as_completed(futures):
+                    chunk_num = futures[future]
+                    try:
+                        chunk_profiles, chunk_failed = future.result()
+                        
+                        # Batch upsert to database
+                        if chunk_profiles:
+                            success, fail = repo.batch_upsert(chunk_profiles)
+                            processed_count += success
+                            failed_count += fail + chunk_failed
+                        else:
+                            failed_count += chunk_failed
+                        
+                        # Update progress
+                        progress = min(processed_count / total_estimate, 1.0)
+                        elapsed = time.time() - start_time
+                        rate = processed_count / elapsed if elapsed > 0 else 0
+                        eta_seconds = (total_estimate - processed_count) / rate if rate > 0 else 0
 
-                # Update progress
-                progress = min(processed_count / total_estimate, 1.0)
-                elapsed = time.time() - start_time
-                rate = processed_count / elapsed if elapsed > 0 else 0
-                eta_seconds = (total_estimate - processed_count) / rate if rate > 0 else 0
-
-                progress_bar.progress(progress)
-                status_text.text(
-                    f"Processed: {processed_count:,} | "
-                    f"Failed: {failed_count} | "
-                    f"Speed: {rate:.0f} rows/sec | "
-                    f"ETA: {eta_seconds/60:.1f} min"
-                )
+                        progress_bar.progress(progress)
+                        status_text.text(
+                            f"Processed: {processed_count:,} | "
+                            f"Failed: {failed_count} | "
+                            f"Speed: {rate:.0f} rows/sec | "
+                            f"ETA: {eta_seconds/60:.1f} min"
+                        )
+                        
+                    except Exception as e:
+                        logger.error(f"Chunk {chunk_num} processing failed: {e}")
+                        failed_count += chunksize
 
             elapsed_total = time.time() - start_time
             st.success(
@@ -328,8 +362,8 @@ elif page == "🧠 Intelligence Extraction":
 
             st.info(f"🚀 Processing {len(contributors_to_process)} contributors with async batching ({settings.max_concurrent_llm} concurrent)...")
 
-            # Initialize LLM client
-            llm_client = OllamaClient(settings)
+            # Initialize embedded GPU LLM client
+            llm_client = EmbeddedLLMClient(settings)
 
             # Progress tracking
             progress_bar = st.progress(0)
@@ -445,8 +479,30 @@ CRITICAL: You MUST include both "SUMMARY:" and "SKILLS:" headers."""
                 # Call LLM for ALL prompts at once (embedded_llm handles micro-batching + concurrency)
                 if prompt_texts:
                     logger.info(f"🚀 Sending ALL {len(prompt_texts)} prompts to embedded_llm (will micro-batch internally)...")
+                    
+                    # Progress callback for live updates
+                    def update_batch_progress(completed_buckets, total_buckets):
+                        # Estimate profiles completed (buckets × avg batch size)
+                        est_profiles = min(completed_buckets * settings.micro_batch_size, len(prompt_texts))
+                        progress = est_profiles / len(contributors_to_process)
+                        elapsed = time.time() - start_time
+                        rate = est_profiles / elapsed if elapsed > 0 else 0
+                        eta_seconds = (len(contributors_to_process) - est_profiles) / rate if rate > 0 else 0
+                        
+                        progress_bar.progress(min(progress, 0.99))
+                        status_text.text(
+                            f"🔥 GPU Processing: {completed_buckets}/{total_buckets} batches | "
+                            f"~{est_profiles}/{len(prompt_texts)} prompts | "
+                            f"Speed: {rate:.1f} profiles/sec | "
+                            f"ETA: {eta_seconds/60:.1f} min"
+                        )
+                    
                     try:
-                        llm_responses = await llm_client.generate_batch(prompt_texts, max_concurrent=settings.max_concurrent_llm)
+                        llm_responses = await llm_client.generate_batch(
+                            prompt_texts, 
+                            max_concurrent=settings.max_concurrent_llm,
+                            progress_callback=update_batch_progress
+                        )
                         logger.info(f"✅ LLM processing complete - received {len(llm_responses)} responses")
                     except Exception as e:
                         logger.error(f"❌ Batch LLM generation failed: {e}")

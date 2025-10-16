@@ -1,8 +1,8 @@
 """
-LLM Client - Wrapper for optimized embedded GPU engine.
+Embedded LLM Client - GPU-accelerated intelligence extraction.
 
-Maintains backward-compatible API while using the new embedded_llm engine
-with FlashAttention-2, micro-batching, and GPU optimizations.
+Uses in-process GPU inference with FlashAttention-2, micro-batching,
+and concurrent bucket processing for optimal throughput.
 """
 import asyncio
 import logging
@@ -15,13 +15,17 @@ from src.intelligence.embedded_llm import EmbeddedLLMEngine
 logger = logging.getLogger(__name__)
 
 
-class OllamaClient:
+class EmbeddedLLMClient:
     """
-    LLM client using optimized embedded GPU engine.
+    Embedded GPU LLM client for intelligence extraction.
     
-    Maintains the same API as the original Ollama REST client for backward compatibility,
-    but now uses in-process GPU inference with FlashAttention-2, micro-batching,
-    pinned memory, dual CUDA streams, and torch.compile.
+    Uses in-process GPU inference with:
+    - 4-bit quantization (Q4_0)
+    - FlashAttention-2 / SDPA
+    - Length-aware micro-batching
+    - Concurrent bucket processing
+    - Pinned memory + dual CUDA streams
+    - torch.compile optimization
     """
     
     def __init__(self, settings: Settings):
@@ -93,7 +97,7 @@ class OllamaClient:
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(self._exec, self.generate, prompt)
     
-    async def generate_batch(self, prompts: List[str], max_concurrent: int = 5) -> List[str]:
+    async def generate_batch(self, prompts: List[str], max_concurrent: int = 5, progress_callback=None) -> List[str]:
         """
         Generate text for multiple prompts with optimized batching.
         
@@ -104,6 +108,7 @@ class OllamaClient:
             prompts: List of input prompts
             max_concurrent: Max concurrent operations (preserved for API compatibility,
                           but actual batching is controlled by engine config)
+            progress_callback: Optional callback(completed, total) for progress updates
             
         Returns:
             List of generated texts in same order as input
@@ -113,14 +118,20 @@ class OllamaClient:
         
         if len(prompts) == 1:
             result = await self.generate_async(prompts[0])
+            if progress_callback:
+                progress_callback(1, 1)
             return [result]
         
-        # Use the optimized batch generation
+        # Use the optimized batch generation with progress callback
         loop = asyncio.get_event_loop()
+        
+        # Wrapper to pass progress_callback
+        def generate_with_progress():
+            return self.engine.generate_batch(prompts, progress_callback=progress_callback)
+        
         results, metrics = await loop.run_in_executor(
             self._exec,
-            self.engine.generate_batch,
-            prompts
+            generate_with_progress
         )
         
         # Log aggregate metrics
@@ -138,11 +149,11 @@ class OllamaClient:
         return results
 
 
-# Singleton instance for backward compatibility
+# Singleton instance
 _client = None
 
 
-def get_llm_client(settings: Settings = None) -> OllamaClient:
+def get_llm_client(settings: Settings = None) -> EmbeddedLLMClient:
     """
     Get or create LLM client singleton.
     
@@ -150,12 +161,16 @@ def get_llm_client(settings: Settings = None) -> OllamaClient:
         settings: Application settings (optional)
         
     Returns:
-        OllamaClient instance
+        EmbeddedLLMClient instance
     """
     global _client
     if _client is None:
         if settings is None:
             from src.config import get_settings
             settings = get_settings()
-        _client = OllamaClient(settings)
+        _client = EmbeddedLLMClient(settings)
     return _client
+
+
+# Backward compatibility alias
+OllamaClient = EmbeddedLLMClient
