@@ -18,14 +18,18 @@ pandas>=2.1.4
 numpy>=1.26.2
 
 # ============================================================================
-# LLM & AI - Embedded GPU
+# LLM & AI - Embedded GPU with Optimizations
 # ============================================================================
-torch>=2.0.0
+# NOTE: Requires CUDA 11.8+ and torch 2.1+ for best performance
+torch>=2.1.0  # Required for torch.compile and optimal FA-2 support
 transformers>=4.43.0
 accelerate>=0.20.0
 bitsandbytes>=0.41.0  # For 4-bit quantization
-einops>=0.7.0  # Often required by transformers
-flash-attn>=2.0.0; platform_system != "Windows"  # Optional: FlashAttention2 for extra speed
+einops>=0.7.0  # Required by some model architectures
+# FlashAttention-2 (highly recommended for 2-3x speed boost)
+# Install: pip install flash-attn --no-build-isolation
+# Requires: CUDA, ninja, packaging
+flash-attn>=2.0.0; platform_system != "Windows"
 
 # ============================================================================
 # WEB FRAMEWORK (Streamlit)

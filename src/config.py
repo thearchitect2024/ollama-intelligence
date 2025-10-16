@@ -37,7 +37,16 @@ class Settings(BaseSettings):
     max_tokens: int = 320  # Max new tokens to generate
     temperature: float = 0.05  # Low temperature for consistent format compliance
     top_p: float = 0.9  # Nucleus sampling parameter
-    max_concurrent_llm: int = 10  # Async concurrency limit (batch processing)
+    max_concurrent_llm: int = 1  # Worker threads for batch collection (REDUCED to enable batching!)
+    
+    # GPU Optimization Parameters (new embedded engine)
+    infer_concurrency: int = 3  # Max concurrent GPU batches (semaphore slots)
+    micro_batch_size: int = 6  # Target prompts per batch
+    batch_latency_ms: int = 100  # Max wait time to collect batch (ms)
+    prefill_batch_tokens: int = 4096  # Max input tokens per prefill batch
+    decode_concurrency: int = 8  # Max concurrent decode operations
+    use_flash_attention: bool = True  # Enable FlashAttention-2 (if available)
+    enable_compile: bool = True  # Enable torch.compile optimization
 
     # Summary validation
     summary_min_words: int = 140
