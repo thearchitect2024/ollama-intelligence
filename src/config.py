@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     csv_workers: int = 8  # Parallel workers for CSV processing (CPU-bound)
     db_batch_size_upsert: int = 100  # Batch size for database upserts
     db_workers: int = 10  # Parallel workers for DB operations (I/O-bound)
-    extraction_workers: int = 10  # App-level threads for per-contributor extraction (streaming model)
+    extraction_workers: int = 50  # App-level threads for per-contributor extraction (need many to saturate queue!)
 
     # Summary validation
     summary_min_words: int = 140
