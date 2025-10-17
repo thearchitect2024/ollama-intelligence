@@ -443,8 +443,8 @@ def _generate_batch_optimized(
                         eos_token_id=_tokenizer.eos_token_id,
                         use_cache=True,
                     )
+            # Wait for compute stream (removed synchronize() to avoid blocking)
             torch.cuda.current_stream().wait_stream(_compute_stream)
-            torch.cuda.synchronize()
         else:
             with torch.inference_mode():
                 out = _model.generate(
