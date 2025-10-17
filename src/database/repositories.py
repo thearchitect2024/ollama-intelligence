@@ -89,41 +89,39 @@ class ContributorRepository:
         """
         
         try:
-            # Get connection for transaction
-            conn = self.db.get_connection()
-            cursor = conn.cursor()
-            
-            # Start transaction
-            cursor.execute("BEGIN TRANSACTION")
-            
-            for profile in profiles:
-                try:
-                    processed_data = profile.model_dump(mode='json', exclude={'intelligence_summary'})
-                    params = (
-                        profile.contributor_email,
-                        profile.contributor_id,
-                        json.dumps(processed_data),
-                        profile.intelligence_summary,
-                        profile.processing_status if isinstance(profile.processing_status, str) else profile.processing_status.value,
-                        datetime.now().isoformat(),
-                        datetime.now().isoformat()
-                    )
-                    cursor.execute(query, params)
-                    successful += 1
-                except Exception as e:
-                    logger.error(f"Failed to upsert {profile.contributor_email} in batch: {e}")
-                    failed += 1
-            
-            # Commit transaction
-            conn.commit()
-            logger.info(f"Batch upsert complete: {successful} successful, {failed} failed")
+            # Get connection for transaction (use context manager!)
+            with self.db.get_connection() as conn:
+                cursor = conn.cursor()
+                
+                # Start transaction
+                cursor.execute("BEGIN TRANSACTION")
+                
+                for profile in profiles:
+                    try:
+                        processed_data = profile.model_dump(mode='json', exclude={'intelligence_summary'})
+                        params = (
+                            profile.contributor_email,
+                            profile.contributor_id,
+                            json.dumps(processed_data),
+                            profile.intelligence_summary,
+                            profile.processing_status if isinstance(profile.processing_status, str) else profile.processing_status.value,
+                            datetime.now().isoformat(),
+                            datetime.now().isoformat()
+                        )
+                        cursor.execute(query, params)
+                        successful += 1
+                    except Exception as e:
+                        logger.error(f"Failed to upsert {profile.contributor_email} in batch: {e}")
+                        failed += 1
+                
+                # Commit transaction
+                conn.commit()
+                logger.info(f"Batch upsert complete: {successful} successful, {failed} failed")
             
         except Exception as e:
             logger.error(f"Batch upsert transaction failed: {e}")
-            try:
-                conn.rollback()
-            except:
-                pass
+            import traceback
+            traceback.print_exc()
             return 0, len(profiles)
         
         return successful, failed
