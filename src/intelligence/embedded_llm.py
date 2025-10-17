@@ -289,7 +289,7 @@ class MicroBatchDispatcher:
     
     def _process_batch(self, items: List[Tuple[str, Future]]):
         """
-        Process a batch with length-aware bucketing and GPU execution.
+        Process a batch with length-aware bucketing and CONCURRENT GPU execution.
         
         Args:
             items: List of (prompt, future) tuples
@@ -311,27 +311,44 @@ class MicroBatchDispatcher:
             bucket_prompts = [item[1] for item in bucket_items]
             buckets.append((bucket_indices, bucket_prompts))
         
-        # Process each bucket with semaphore control
-        for bucket_indices, bucket_prompts in buckets:
+        # Helper function to process one bucket
+        def process_one_bucket(bucket_indices, bucket_prompts):
+            """Process a single bucket with semaphore-controlled GPU access."""
             with self.semaphore:  # GPU concurrency control
                 try:
-                    # Generate for this bucket
                     results, _ = _generate_batch_optimized(
                         bucket_prompts,
                         max_new_tokens=320,
                         temperature=0.05,
                         top_p=0.9
                     )
-                    
+                    return bucket_indices, results, None
+                except Exception as e:
+                    return bucket_indices, None, e
+        
+        # Process all buckets CONCURRENTLY with ThreadPoolExecutor
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
+        with ThreadPoolExecutor(max_workers=len(buckets)) as executor:
+            # Submit all buckets for concurrent processing
+            bucket_futures = {
+                executor.submit(process_one_bucket, indices, prompts): (indices, prompts)
+                for indices, prompts in buckets
+            }
+            
+            # Collect results as they complete
+            for future in as_completed(bucket_futures):
+                bucket_indices, results, error = future.result()
+                
+                if error:
+                    logger.error(f"Batch processing error: {error}")
+                    # Set error on all futures in this bucket
+                    for idx in bucket_indices:
+                        futures[idx].set_exception(error)
+                else:
                     # Set results on corresponding futures
                     for idx, result in zip(bucket_indices, results):
                         futures[idx].set_result(result)
-                        
-                except Exception as e:
-                    logger.error(f"Batch processing error: {e}")
-                    # Set error on all futures in this bucket
-                    for idx in bucket_indices:
-                        futures[idx].set_exception(e)
     
     def shutdown(self):
         """Gracefully shutdown the dispatcher."""

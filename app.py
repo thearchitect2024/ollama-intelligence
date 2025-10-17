@@ -360,7 +360,7 @@ elif page == "🧠 Intelligence Extraction":
                 st.info("✅ All contributors already have intelligence summaries!")
                 st.stop()
 
-            st.info(f"🚀 Processing {len(contributors_to_process)} contributors with async batching ({settings.max_concurrent_llm} concurrent)...")
+            st.info(f"🚀 Processing {len(contributors_to_process)} contributors | Workers: {settings.extraction_workers} | GPU Batches: {settings.infer_concurrency} | Batch Size: {settings.micro_batch_size}")
 
             # Initialize embedded GPU LLM client
             llm_client = EmbeddedLLMClient(settings)
